@@ -93,6 +93,7 @@ Usage: k5start [options] [name [command]]\n\
                         principal and don't look for a principal on the\n\
                         command line\n\
    -v                   Verbose\n\
+   -X <attr>[=<val>]    Pre-auth attribute(s) to pass to pre-auth plugins\n\
    -x                   Exit immediately on any error\n\
 \n\
 If the environment variable AKLOG (or KINIT_PROG for backward compatibility)\n\
@@ -369,13 +370,41 @@ strip_cache_prefix(const char *cache)
     return cache;
 }
 
+static int num_pa_opts = 0;
+static krb5_gic_opt_pa_data *pa_opts = NULL;
+static int
+add_preauth_opt(char *av)
+{
+    char *sep, *v;
+    krb5_gic_opt_pa_data *p, *x;
+    size_t newsize = (num_pa_opts + 1) * sizeof(*pa_opts);
+
+    x = realloc(pa_opts, newsize);
+    if (x == NULL)
+        return ENOMEM;
+    pa_opts = x;
+
+    p = &pa_opts[num_pa_opts];
+    sep = strchr(av, '=');
+    if (sep) {
+        *sep = '\0';
+        v = ++sep;
+        p->value = v;
+    } else {
+        p->value = "yes";
+    }
+    p->attr = av;
+    num_pa_opts++;
+    return 0;
+}
+
 
 int
 main(int argc, char *argv[])
 {
     struct config config;
     struct k5start_internal internal;
-    int opt;
+    int opt, loop;
     const char *inst = NULL;
     const char *sname = NULL;
     const char *sinst = NULL;
@@ -392,7 +421,7 @@ main(int argc, char *argv[])
     bool run_as_daemon;
     bool search_keytab = false;
     static const char optstring[] =
-        "abc:Ff:g:H:hI:i:K:k:Ll:m:no:Pp:qr:S:stUu:vx";
+        "abc:Ff:g:H:hI:i:K:k:Ll:m:no:Pp:qr:S:stUu:vX:x";
 
     /* Initialize logging. */
     message_program_name = "k5start";
@@ -455,6 +484,11 @@ main(int argc, char *argv[])
             break;
         case 'u':
             principal = optarg;
+            break;
+        case 'X':
+            code = add_preauth_opt(optarg);
+            if (code)
+                die("bad preauth attribute %s", optarg);
             break;
         case 'x':
             config.exit_errors = true;
@@ -564,8 +598,10 @@ main(int argc, char *argv[])
         die("-b only makes sense with -K or a command to run");
     if (config.keep_ticket > 0 && internal.keytab == NULL)
         die("-K option requires a keytab be specified with -f");
+#if 0
     if (config.command != NULL && internal.keytab == NULL)
         die("running a command requires a keytab be specified with -f");
+#endif
     if (lifetime > 0 && config.keep_ticket > lifetime)
         die("-K limit %ld must be smaller than lifetime %d",
             config.keep_ticket, lifetime);
@@ -714,6 +750,15 @@ main(int argc, char *argv[])
         krb5_get_init_creds_opt_set_forwardable(internal.kopts, 0);
     if (nonproxiable)
         krb5_get_init_creds_opt_set_proxiable(internal.kopts, 0);
+    for (loop = 0; loop < num_pa_opts; loop++) {
+        code = krb5_get_init_creds_opt_set_pa(ctx, internal.kopts,
+                                              pa_opts[loop].attr,
+                                              pa_opts[loop].value);
+        if (code != 0)
+            die_krb5(ctx, code, "error setting attribute %s=%s",
+                     pa_opts[loop].attr,
+                     pa_opts[loop].value);
+    }
 
     /* Do the actual work. */
     run_framework(ctx, &config);
